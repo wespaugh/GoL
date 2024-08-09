@@ -120,6 +120,8 @@ public class GoLBoard : MonoBehaviour
       changeMapB[i] = false;
     }
     useBoardA = true;
+
+    t.size = new Vector3Int(Bounds.x, Bounds.y);
   }
 
   private void setBoardValue(int x, int y, bool value)
@@ -181,18 +183,7 @@ public class GoLBoard : MonoBehaviour
 
   private IEnumerator tick()
   {
-    firstRun = false;
-    t.size = new Vector3Int(Bounds.x, Bounds.y);
-    for (int i = 0; i < Bounds.x; i++)
-    {
-      for (int j = 0; j < Bounds.y; j++)
-      {
-        // offset by half the board size to keep it centered in the view
-        Vector3Int startLoc = new Vector3Int((-Bounds.x/2) + i, (-Bounds.y/2) + j);
-        t.SetTile(startLoc, getBoardValue(i,j) ? aliveTile : deadTile);
-      }
-    }
-
+    renderBoard();
 
     yield return new WaitForSeconds(refreshMilliseconds / 1000.0f);
 
@@ -205,6 +196,19 @@ public class GoLBoard : MonoBehaviour
 
     stepSimulation();
     StartCoroutine(tick());
+  }
+
+  private void renderBoard()
+  {
+    for (int i = 0; i < Bounds.x; i++)
+    {
+      for (int j = 0; j < Bounds.y; j++)
+      {
+        // offset by half the board size to keep it centered in the view
+        Vector3Int startLoc = new Vector3Int((-Bounds.x / 2) + i, (-Bounds.y / 2) + j);
+        t.SetTile(startLoc, getBoardValue(i, j) ? aliveTile : deadTile);
+      }
+    }
   }
 
   private void stepSimulation()
@@ -307,9 +311,14 @@ public class GoLBoard : MonoBehaviour
 
   public void StartSimulation()
   {
+    if(stopRequested)
+    {
+      stopRequested = false;
+    }
     if(running) return;
     if(firstRun)
     {
+      firstRun = false;
       initBoard();
     }
     running = true;
