@@ -8,8 +8,12 @@ using UnityEngine.Tilemaps;
 
 public class GoLBoard : MonoBehaviour
 {
+  public static readonly float DEFAULT_PROBABILITY_OF_LIFE = 0.5f;
+  public static readonly int DEFAULT_BOARD_SIZE_X = 100;
+  public static readonly int DEFAULT_BOARD_SIZE_Y = 100;
+  public static readonly int DEFAULT_REFRESH_RATE = 500;
   [SerializeField]
-  Tilemap t;
+  Tilemap tilemap;
 
   [SerializeField]
   Tile aliveTile = null;
@@ -17,38 +21,39 @@ public class GoLBoard : MonoBehaviour
   Tile deadTile = null;
 
   [SerializeField]
-  private Vector2Int Bounds = new Vector2Int(100, 100);
+  private Vector2Int Bounds = new Vector2Int(DEFAULT_BOARD_SIZE_X, DEFAULT_BOARD_SIZE_Y);
 
   [Range(0.0f, 1.0f)]
   [SerializeField]
   float initialLifeProbability = .5f;
 
   // as we update the simulation, the 'current' iteration of the board will oscillate between A and B
+  //
+  // note that these are 2D arrays condensed onto a single bitmap. each (x,y) position is indexed at (y*Bounds.width + x).
+  // Only access these bitmaps through their accessor functions (setBoardValue(x,y,v), getBoardValue(x,y), etc.) to guarantee proper indexing
   bool[] boardA = null;
   bool[] boardB = null;
 
   // the flag that determines which board to look at. flips once per simulation step
   bool useBoardA = true;
 
-  // as an efficiency solution, keep a bitmap of things that have changed
-  // algorithm will iterate over One Map to see what might need updated,
-  // and as it finds those locations change it will flip a bit and all its neighbords to 1 on The Other map
-  // we'll use the same useBoardA flag to flip between them each simulation step
-  bool[] changeMapA = null;
-  bool[] changeMapB = null;
-
   bool firstRun = true;
   bool running = false;
   bool stopRequested = false;
 
+  // a flag to allow click-and-drag to invert tile statuses
   bool holdingClick = false;
 
+  // the refresh period of the simulation
   private float refreshMilliseconds = 500.0f;
 
+  // the most recently clicked tile, to prevent click-and-drag from repeatedly toggling the same tile
   Vector3 mouseClickCache = Vector3.negativeInfinity;
 
   private void Awake()
   {
+    // create a default board so we're ready to start
+    firstRun = true;
     initBoard();
   }
 
@@ -65,8 +70,9 @@ public class GoLBoard : MonoBehaviour
       Vector3 worldPoint = Camera.main.ScreenToWorldPoint(Input.mousePosition);
 
 
-      var tileOffset = t.WorldToCell(worldPoint);
+      var tileOffset = tilemap.WorldToCell(worldPoint);
 
+      // only allow a tile to be toggled once until the mouse moves off of it
       if (tileOffset == mouseClickCache)
       {
         return;
@@ -74,7 +80,7 @@ public class GoLBoard : MonoBehaviour
       mouseClickCache = tileOffset;
 
       // Try to get a tile from cell position
-      var tile = t.GetTile(tileOffset);
+      var tile = tilemap.GetTile(tileOffset);
 
       // if we did click on a tile
       if (tile)
@@ -84,46 +90,58 @@ public class GoLBoard : MonoBehaviour
         Vector3Int arrayPosition = new Vector3Int(tileOffset.x + Bounds.x / 2, tileOffset.y + Bounds.y / 2, 0);
         bool newValue = !getBoardValue(arrayPosition.x, arrayPosition.y);
         setBoardValue(arrayPosition.x, arrayPosition.y, newValue);
-        t.SetTile(tileOffset, newValue ? aliveTile : deadTile);
+        tilemap.SetTile(tileOffset, newValue ? aliveTile : deadTile);
 
       }
     }
   }
 
+  /**
+   * Update Simulation parameters from the UI.
+   * Changes to the board will require a restart before taking effect. Refresh will be updated at the next simulation tick
+   */
   public void updateParams(int x, int y, int refresh, float initProbability, bool forceRestart = false)
   {
+    // the board will need to be remade if that's specifically requested, or if the size of the board changed
     bool dirty = Bounds.x != x || Bounds.y != y || forceRestart;
+
+    // cache the new simulation parameters
     Bounds = new Vector2Int(x, y);
     initialLifeProbability = initProbability;
     refreshMilliseconds = refresh;
 
+    // if we need to restart the simulation, do so
     if (dirty)
     {
-      t.ClearAllTiles();
+      tilemap.ClearAllTiles();
       initBoard();
     }
   }
 
+  // Initialize a board when the application starts or when the bounds of the board are changed
   private void initBoard()
   {
+    // create both of the frame buffers (A will be the first 'current' step, and B will be the first 'next' step, and they will switch each tick)
     boardA = new bool[Bounds.x * Bounds.y];
     boardB = new bool[Bounds.x * Bounds.y];
-    changeMapA = new bool[Bounds.x * Bounds.y];
-    changeMapB = new bool[Bounds.x * Bounds.y];
 
+    // initialize both values to some random value based on the probability of life specified
     for (int i = 0; i < boardA.Length; i++)
     {
       boardA[i] = UnityEngine.Random.Range(0.01f, 1.0f) <= initialLifeProbability;
       boardB[i] = boardA[i];
-      // inspect everything on the first pass
-      changeMapA[i] = true;
-      changeMapB[i] = false;
     }
     useBoardA = true;
 
-    t.size = new Vector3Int(Bounds.x, Bounds.y);
+    // update the tilemap dimensions
+    tilemap.size = new Vector3Int(Bounds.x, Bounds.y);
+
+    // setting this flag makes the simulation show the first frame for a refresh period before starting the tickloop
+    firstRun = true;
+    renderBoard();
   }
 
+  // Set a value on the 'before' board, in a simulation tick before/after
   private void setBoardValue(int x, int y, bool value)
   {
     if(useBoardA)
@@ -136,6 +154,7 @@ public class GoLBoard : MonoBehaviour
     }
   }
 
+  // set a value on the 'after' board, in a simulation tick before/after
   private void setUpdatedBoardValue(int x, int y, bool value)
   {
     if(useBoardA)
@@ -148,41 +167,25 @@ public class GoLBoard : MonoBehaviour
     }
   }
 
+  // get a value from the 'before' board, in a simulation step before / after
   private bool getBoardValue(int x, int y)
   {
     return useBoardA ? boardA[y*Bounds.x + x] : boardB[y * Bounds.x + x];
   }
 
-  private bool getCellChanged(int x, int y)
+  // the first loop of a simulation, we want to wait
+  // a full tick before the main simulation loop kicks off.
+  private IEnumerator showFirstFrameThenTick()
   {
-    return useBoardA ? changeMapA[y * Bounds.x + x] : changeMapB[y * Bounds.x + x];
-  }
-  private void setCellChanged(int x, int y)
-  {
-    // note that if useBoardA is true, we update changeMapB and vice versa.
-    // this is because useBoardA denotes the board we are iterating over, so we need to be updating the other one
-    bool[] changeMap = useBoardA ? changeMapB : changeMapA;
-
-    // flip all the neighbors, as well
-    for (int i = -1; i <= 1; ++i)
-    {
-      for (int j = -1; j <= 1; ++j)
-      {
-        if (x + i < 0 || x + i >= Bounds.x) continue;
-        if(y + j < 0 || y + j >= Bounds.y) continue;
-        changeMap[y * Bounds.x + x] = true;
-      }
-    }
+    yield return new WaitForSeconds(refreshMilliseconds / 1000.0f);
+    StartCoroutine(tick());
   }
 
-  private void resetChangeMap()
-  {
-    bool[] changeMap = useBoardA ? changeMapA : changeMapB;
-    for (int i = 0; i < changeMap.Length; ++i) { changeMap[i] = false; }
-  }
-
+  // begins the simulation and immediately executes a step and renders a frame
+  // then, the loop waits a Refresh amount of time and starts the loop again
   private IEnumerator tick()
   {
+    stepSimulation();
     renderBoard();
 
     yield return new WaitForSeconds(refreshMilliseconds / 1000.0f);
@@ -194,10 +197,10 @@ public class GoLBoard : MonoBehaviour
       yield break;
     }
 
-    stepSimulation();
     StartCoroutine(tick());
   }
 
+  // updates all of the tiles to their current alive/dead state based on the current simulation representation
   private void renderBoard()
   {
     for (int i = 0; i < Bounds.x; i++)
@@ -206,54 +209,34 @@ public class GoLBoard : MonoBehaviour
       {
         // offset by half the board size to keep it centered in the view
         Vector3Int startLoc = new Vector3Int((-Bounds.x / 2) + i, (-Bounds.y / 2) + j);
-        t.SetTile(startLoc, getBoardValue(i, j) ? aliveTile : deadTile);
+        tilemap.SetTile(startLoc, getBoardValue(i, j) ? aliveTile : deadTile);
       }
     }
   }
 
   private void stepSimulation()
   {
-    // int complexity = 0;
     // loop over every existing cell
     for (int i = 0; i < Bounds.x; ++i)
     {
       for( int j = 0;j < Bounds.y; ++j)
       {
-        if (!getCellChanged(i, j)) continue;
         bool currentStatus = getBoardValue(i, j);
 
         int livingNeightbors = getNeighborsAtPosition(i,j);
         // if cell was dead previously, cell comes back alive if exactly 3 neighbors lived
         if (!currentStatus)
         {
-          if (livingNeightbors == 3)
-          {
-            setUpdatedBoardValue(i, j, true);
-            setCellChanged(i, j);
-          }
-          else
-          {
-            setUpdatedBoardValue(i, j, false);
-          }
+          setUpdatedBoardValue(i, j, livingNeightbors == 3);
         }
         // if cell was alive previously, cell stays alive if it has 2 or 3 neighbors
         else
         {
-          if (!(livingNeightbors == 2 || livingNeightbors == 3))
-          {
-            setUpdatedBoardValue(i, j, false);
-            setCellChanged(i, j);
-          }
-          else
-          {
-            setUpdatedBoardValue(i, j, true);
-          }
+          setUpdatedBoardValue(i, j, livingNeightbors == 2 || livingNeightbors == 3);
         }
       }
     }
-    // resetChangeMap();
     useBoardA = !useBoardA;
-    // Debug.Log("Complexity: " + complexity);
   }
 
   private int getNeighborsAtPosition(int i, int j)
@@ -282,6 +265,7 @@ public class GoLBoard : MonoBehaviour
         neighborY = j + nj;
 
         // small optimization thought: if cell is dead (pass that into the function) and there aren't enough remaining neighbors to revitalize it, break early
+        // not the biggest priority as it is an edge case of an edge case of an edge case, but worth a mention
 
         // if neighbor isn't on the map, continue;
         if (neighborY < 0 || neighborY >= Bounds.y) continue;
@@ -304,24 +288,39 @@ public class GoLBoard : MonoBehaviour
     return livingNeighbors;
   }
 
+  // sets a flag that will stop the simulation from taking another step once the current tick() finishes
   public void StopSimulation()
   {
     stopRequested = true;
   }
 
+  // starts or restarts the simulation. firstRun will be set if the board has just been created,
+  // in which case the initial frame is shown for one refresh period before the simulation starts updating
   public void StartSimulation()
   {
+    // if we ninja-clicked stop then start, just clear the stop request so the simulation continues unabated
     if(stopRequested)
     {
       stopRequested = false;
     }
+    // if we are already running (shouldn't be possible since the button is disabled, but just in case), bail out rather than
+    // start multiple concurrent tick loops
     if(running) return;
-    if(firstRun)
+
+    // set that flag so duplicate ticks don't start
+    running = true;
+
+    // if the simulation is just starting, show the default frame before beginning the tick
+    if (firstRun)
     {
       firstRun = false;
-      initBoard();
+      StartCoroutine(showFirstFrameThenTick());
     }
-    running = true;
-    StartCoroutine(tick());
+    // if we've paused and restarted the simulation, start the main tick loop, which will immediately step the simulation forward
+    // before waiting another refresh period
+    else
+    {
+      StartCoroutine(tick());
+    }
   }
 }
